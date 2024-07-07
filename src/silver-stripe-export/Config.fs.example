@@ -2,6 +2,8 @@ module Config
 
 let [<Literal>] connectionString = "Server=127.0.01;Database=silverstripe;User=silverstripe;Password=silverstripe"
 
+let silverstripeAssetBasePath = "/path/to/silverstripe/assets"
+
 let wordpressConfig : Wordpress.Config = {
     Site = "example.wordpress.com"
     ClientId = "12345"

@@ -17,7 +17,7 @@ type Sql =
 // Behaviour based on getFileID at https://github.com/silverstripe/silverstripe-assets/blob/1.1.2/src/Flysystem/FlysystemAssetStore.php#L845
 let getFilesystemPath (path : string) (hash : string) =
     let path = Regex.Replace(path, "__+", "_")
-    $"{Path.GetDirectoryName path}/{hash.Substring(0, 10)}/${Path.GetFileName path}"
+    $"{Path.GetDirectoryName path}/{hash.Substring(0, 10)}/{Path.GetFileName path}"
 
 type ImageAttributes = {
     Id : int
