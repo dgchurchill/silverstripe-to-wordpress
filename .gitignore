@@ -1,2 +1,5 @@
 obj/
 bin/
+*.nettrace
+*~
+/src/silver-stripe-export/Config.fs
