@@ -1,3 +1,11 @@
 module Config
 
 let [<Literal>] connectionString = "Server=127.0.01;Database=silverstripe;User=silverstripe;Password=silverstripe"
+
+let wordpressConfig : Wordpress.Config = {
+    Site = "example.wordpress.com"
+    ClientId = "12345"
+    ClientSecret = "aBcdxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    Username = "user@example.com"
+    Password = "abcd efgh ijkl mnop"
+}

@@ -3,3 +3,4 @@ bin/
 *.nettrace
 *~
 /src/silver-stripe-export/Config.fs
+.DS_Store

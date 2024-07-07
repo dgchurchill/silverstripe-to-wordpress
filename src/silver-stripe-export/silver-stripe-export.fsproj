@@ -7,13 +7,19 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Wordpress.fs" />
     <Compile Include="Config.fs" />
+    <Compile Include="Silverstripe.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
     <PackageReference Include="SQLProvider" Version="1.3.36" />
+    <PackageReference Include="WordPressPCL" Version="2.1.0" />
+    <!-- <Reference Include="WordPressPCL"> -->
+    <!--   <HintPath>../vendor/WordPressPCL/WordPressPCL/bin/Debug/netstandard2.0/WordPressPCL.dll</HintPath> -->
+    <!-- </Reference> -->
   </ItemGroup>
 
 </Project>
