@@ -2,6 +2,7 @@ module Silverstripe
 
 open FParsec
 open FSharp.Data.Sql
+open System
 open System.Text.RegularExpressions
 open System.IO
 
@@ -18,8 +19,17 @@ let getFilesystemPath (path : string) (hash : string) =
     let path = Regex.Replace(path, "__+", "_")
     $"{Path.GetDirectoryName path}/{hash.Substring(0, 10)}/${Path.GetFileName path}"
 
+type ImageAttributes = {
+    Id : int
+    Source : string
+    Width : int
+    Height : int
+    Classes : string list
+    Title : string
+}
+
 type ShortcodeKind =
-    | Image
+    | Image of attributes:ImageAttributes
     | FileLink of id:int
     | SiteTreeLink of id:int
     | Unknown
@@ -42,15 +52,35 @@ let withRawText (p : Parser<'a, 'u>) : Parser<'a * string, 'u> =
             Reply (reply.Status, reply.Error)
 
 let pshortcode =
+    let ident =
+        many1Satisfy (fun c -> isAsciiLetter c || c = '_')
+    
     let shortcodeWithId command =
-        pstring command >>. skipString ",id=" >>. pint32
+        skipString command >>. skipString ",id=" >>. pint32
+
+    let quotedString = between (skipChar '"') (skipChar '"') (manySatisfy (isNoneOf "\""))
+
+    let attribute =
+        ident .>> pchar '=' .>>. quotedString
+
+    let shortcodeWithAttributes command =
+        skipString command >>. spaces1 >>. many (attribute .>> spaces)
 
     let unknownShortcode =
-        many1Satisfy (fun c -> isAsciiLetter c || c = '_') >>. manySatisfy ((<>) ']') |>> (fun _ -> Unknown)
+        ident >>. manySatisfy ((<>) ']') |>> (fun _ -> Unknown)
 
     let shortcodeBody =
         shortcodeWithId "file_link" |>> FileLink
         <|> (shortcodeWithId "sitetree_link" |>> SiteTreeLink)
+        <|> (shortcodeWithAttributes "image" |>> fun attribs ->
+             Image {
+                 Id = attribs |> Seq.find (fst >> (=) "id") |> snd |> Int32.Parse
+                 Source = attribs |> Seq.find (fst >> (=) "src") |> snd
+                 Title = attribs |> Seq.find (fst >> (=) "title") |> snd
+                 Width = attribs |> Seq.find (fst >> (=) "width") |> snd |> Int32.Parse
+                 Height = attribs |> Seq.find (fst >> (=) "height") |> snd |> Int32.Parse
+                 Classes = attribs |> Seq.find (fst >> (=) "class") |> snd |> (fun x -> x.Split(" ") |> List.ofArray)
+             })
         <|> unknownShortcode
 
     withRawText (between (skipString "[") (skipString "]") shortcodeBody)
