@@ -1,6 +1,7 @@
 ﻿open FSharp.Control
 open System.IO
 open WordPressPCL.Models
+open FSharp.Json
 
 let dump (maybeLimit : int option) (rows : seq<seq<string * obj>>) =
     let limitedRows =
@@ -12,6 +13,12 @@ let dump (maybeLimit : int option) (rows : seq<seq<string * obj>>) =
         for key, value in row do
             printf "%s: %O; " key value
         printfn ""
+
+type Media = {
+    SilverstripeId : int
+    WordPressId : int
+    WordPressSourceUrl : string
+}
 
 task {
     let! wordpress = Wordpress.createClient Config.wordpressConfig
@@ -53,9 +60,27 @@ task {
         |> Seq.map (fun i -> files[i])
         |> List.ofSeq
 
-    let! wordpressMedia =
+    let uploadedMediaStateFile = "uploaded-media.json"
+    
+    let uploadedMediaState : Media list =
+        if File.Exists uploadedMediaStateFile then
+            File.ReadAllText uploadedMediaStateFile
+            |> Json.deserialize
+        else
+            []
+
+    let uploadedMediaStateDict =
+        uploadedMediaState
+        |> Seq.map (fun x -> x.SilverstripeId, x)
+        |> Map.ofSeq
+
+    let! uploadedMedia =
         requiredFiles
         |> Seq.map (fun file -> task {
+            match uploadedMediaStateDict |> Map.tryFind file.Id with
+            | Some media -> return media
+            | None ->
+
             printfn "Uploading %s..." file.Name
             if file.FileVariant <> "" then
                 failwithf "file %i '%s' '%s' has non-null variant" file.Id file.Name file.FileVariant
@@ -66,10 +91,20 @@ task {
 
             printfn "wordpress media id = %i" mediaItem.Id
 
-            return file.Id, (mediaItem.Id, mediaItem.SourceUrl)
+            return {
+                Media.SilverstripeId = file.Id
+                WordPressId = mediaItem.Id
+                WordPressSourceUrl = mediaItem.SourceUrl
+            }
         })
         |> System.Threading.Tasks.Task.WhenAll
-        |> Task.map Map.ofSeq
+
+    File.WriteAllText(uploadedMediaStateFile, Json.serialize uploadedMedia)
+
+    let wordpressMedia =
+        uploadedMedia
+        |> Seq.map (fun x -> x.SilverstripeId, x)
+        |> Map.ofSeq
 
     for page in exportPages |> Seq.take 3 do
         printfn "Processing '%s'..." page.Title
@@ -84,8 +119,8 @@ task {
             | Silverstripe.Image image ->
                 let file = files[image.Id]
                 printfn "%i; %s; %s; %s; %s; %s; %i; %i; %s" file.Id file.ClassName file.FileFilename file.FileHash file.FileVariant file.Name file.OwnerId file.ParentId file.Title
-                let (id, link) = wordpressMedia[image.Id]
-                content <- content.Replace(shortcode.Text, $"""<!-- wp:image {{"id":{id}}} --><figure class="wp-block-image"><img src="{link}" class="wp-image-{id}" /></figure><!-- /wp:image -->""")
+                let media = wordpressMedia[image.Id]
+                content <- content.Replace(shortcode.Text, $"""<!-- wp:image {{"id":{media.WordPressId}}} --><figure class="wp-block-image"><img src="{media.WordPressSourceUrl}" class="wp-image-{media.WordPressId}" /></figure><!-- /wp:image -->""")
     
             | Silverstripe.FileLink id ->
                 let file = files[id]
