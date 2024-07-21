@@ -3,18 +3,19 @@ open FSharp.Json
 open Microsoft.Extensions.Logging
 open System.IO
 open WordPressPCL.Models
-
+open System.Threading
+open System
 
 let loggerFactory =
     LoggerFactory.Create(fun builder ->
-        builder.AddSimpleConsole(fun options ->
-            options.IncludeScopes <- true
-            options.SingleLine <- true
-            options.TimestampFormat <- "HH:mm:ss "
-        ) |> ignore)
-
-let logger = loggerFactory.CreateLogger("main")
-
+        builder
+            .AddSimpleConsole(fun options ->
+                options.IncludeScopes <- true
+                options.SingleLine <- true
+                options.TimestampFormat <- "HH:mm:ss "
+            )
+            .SetMinimumLevel(LogLevel.Information)
+            |> ignore)
 
 let dump (maybeLimit : int option) (rows : seq<seq<string * obj>>) =
     let limitedRows =
@@ -34,6 +35,8 @@ type Media = {
 }
 
 task {
+    let logger = loggerFactory.CreateLogger("main")
+    
     let! wordpress = Wordpress.createClient Config.wordpressConfig
 
     let silverstripe = Silverstripe.Sql.GetDataContext().Silverstripe
@@ -118,8 +121,8 @@ task {
             if dryRun then
                 return {
                     Media.SilverstripeId = file.Id
-                    WordPressId = -1
-                    WordPressSourceUrl = null
+                    WordPressId = -file.Id
+                    WordPressSourceUrl = sprintf "dryrun-placeholder-url-%i" file.Id
                 }
             else
                 let! mediaItem = wordpress.Media.CreateAsync(path, file.FileFilename)
@@ -148,32 +151,42 @@ task {
 
         let shortcodes = Silverstripe.findShortcodes page.Content
         for shortcode in shortcodes do
-            printfn "%A" shortcode
+            logger.LogDebug("{shortcode}", sprintf "%A" shortcode)
     
             match shortcode.Kind with
             | Silverstripe.Image image ->
-                let file = files[image.Id]
-                printfn "%i; %s; %s; %s; %s; %s; %i; %i; %s" file.Id file.ClassName file.FileFilename file.FileHash file.FileVariant file.Name file.OwnerId file.ParentId file.Title
                 let media = wordpressMedia[image.Id]
                 content <- content.Replace(shortcode.Text, $"""<!-- wp:image {{"id":{media.WordPressId}}} --><figure class="wp-block-image"><img src="{media.WordPressSourceUrl}" class="wp-image-{media.WordPressId}" /></figure><!-- /wp:image -->""")
     
             | Silverstripe.FileLink id ->
-                match files |> Map.tryFind id with
-                | Some file ->
-                    printfn "%i; %s; %s; %s; %s; %s; %i; %i; %s" file.Id file.ClassName file.FileFilename file.FileHash file.FileVariant file.Name file.OwnerId file.ParentId file.Title
+                match wordpressMedia |> Map.tryFind id with
+                | Some media ->
+                    // Silverstripe file_link shortcodes are used to splice the file url into a href attribute, so just replace them with the url to the file.
+                    content <- content.Replace(shortcode.Text, media.WordPressSourceUrl)
                 | None ->
                     logger.LogWarning("File with id {id} not found", id)
-            | _ -> ()
+            | x ->
+                logger.LogWarning("Shortcode {shortcode} not supported", sprintf "%A" x)
 
-//        printfn "%s" page.Content
+        // if page.Title = "2023 Newsletters" then
+        //     printfn "%s" page.Content
+        //     printfn "----"
+        //     printfn "%s" content
 
         let post = Post()
         post.Title <- Title (page.Title + " v8")
         post.Date <- page.LastEdited
         post.Content <- Content content
-        post.Type <- // todo: maybe post for meetings?
+        post.Type <-
             match page.ClassName with
+            | "ArticleHolder"
+            | "HomePage"
+            | "MeetEventTopPage"
+            | "NewsletterHolder"
             | "Page" -> "page"
+            
+            | "MeetingEventPage" -> "post"
+            
             | x ->
                 logger.LogWarning("unhandled ClassName {className}", x)
                 "post"
@@ -181,7 +194,14 @@ task {
 
         if not dryRun then
             let! result = wordpress.Posts.CreateAsync(post)
-            printfn "created page %i" result.Id
-            printfn ""
+            logger.LogInformation("created page {id}", result.Id)
 }
 |> fun x -> x.Wait()
+
+loggerFactory.Dispose()
+
+// Wait for console logger to process its queue. On Dispose it will only wait
+// for up to 1.5s to clear the queue, and we might have more to go...
+// https://github.com/dotnet/runtime/blob/894f22d768e510fddb34259eca1107a5b26c9415/src/libraries/Microsoft.Extensions.Logging.Console/src/ConsoleLoggerProcessor.cs#L191
+Thread.Sleep(TimeSpan.FromSeconds 1)
+printfn "end."
