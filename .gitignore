@@ -5,3 +5,4 @@ bin/
 /src/silver-stripe-export/Config.fs
 /src/silver-stripe-export/uploaded-media.json
 .DS_Store
+/src/silver-stripe-export/uploaded-pages.json

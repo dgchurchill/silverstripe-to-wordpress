@@ -28,10 +28,25 @@ let dump (maybeLimit : int option) (rows : seq<seq<string * obj>>) =
             printf "%s: %O; " key value
         printfn ""
 
+type SilverstripePage = {
+    Id : int
+    Title : string
+    ClassName : string
+    Content : string
+    IsDraft : bool
+    LastEdited : DateTime
+}
+
 type Media = {
     SilverstripeId : int
     WordPressId : int
     WordPressSourceUrl : string
+}
+
+type Page = {
+    SilverstripeId : int
+    WordPressId : int
+    WordPressUrl : string
 }
 
 task {
@@ -48,23 +63,42 @@ task {
     // for file in silverstripe.FileLive do
     //     printfn "%i; %s; %s; %s; %s; %s; %i; %i; %s" file.Id file.ClassName file.FileFilename file.FileHash file.FileVariant file.Name file.OwnerId file.ParentId file.Title
 
-    // silverstripe.SiteTreeLive
-    // |> Seq.groupBy (fun x -> x.ClassName)
-    // |> Seq.map (fun (k, xs) -> k, Seq.length xs)
-    // |> Seq.iter (printfn "%A")
-
     let files =
         silverstripe.FileLive
         |> Seq.map (fun x -> x.Id, x)
         |> Map.ofSeq
 
-    let exportPages =
+    // todo: verify that each page id only appears in either livePages OR draftPages
+
+    let livePages : SilverstripePage seq =
         silverstripe.SiteTreeLive
         |> Seq.where (fun page -> page.ShowInMenus <> 0uy || page.ShowInSearch <> 0uy)  // pages that have ShowInMenus and ShowInSearch false are error pages or otherwise not visible
-      //  |> Seq.take 3  // todo: remove
+        |> Seq.map (fun x -> {
+            Id = x.Id
+            Title = x.Title
+            ClassName = x.ClassName
+            Content = x.Content
+            IsDraft = false
+            LastEdited = x.LastEdited
+        })
+
+    let draftPages =
+        silverstripe.SiteTree
+        |> Seq.where (fun page -> page.ShowInMenus <> 0uy || page.ShowInSearch <> 0uy)  // pages that have ShowInMenus and ShowInSearch false are error pages or otherwise not visible
+        |> Seq.map (fun x -> {
+            Id = x.Id
+            Title = x.Title
+            ClassName = x.ClassName
+            Content = x.Content
+            IsDraft = true
+            LastEdited = x.LastEdited
+        })
+
+    let exportPages =
+        Seq.concat [| livePages; draftPages |]
         |> List.ofSeq
 
-    let requiredFilesForPage (page : Silverstripe.Sql.dataContext.``silverstripe.SiteTree_LiveEntity``) : int seq =
+    let requiredFilesForPage (page : SilverstripePage) : int seq =
         Silverstripe.findShortcodes page.Content
         |> Seq.choose (fun shortcode ->
             let maybeId =
@@ -122,7 +156,7 @@ task {
                 return {
                     Media.SilverstripeId = file.Id
                     WordPressId = -file.Id
-                    WordPressSourceUrl = sprintf "dryrun-placeholder-url-%i" file.Id
+                    WordPressSourceUrl = sprintf "dryrun-placeholder-url-media-%i" file.Id
                 }
             else
                 let! mediaItem = wordpress.Media.CreateAsync(path, file.FileFilename)
@@ -144,7 +178,81 @@ task {
         |> Seq.map (fun x -> x.SilverstripeId, x)
         |> Map.ofSeq
 
+    let uploadedPagesStateFile = "uploaded-pages.json"
+
+    let uploadedPageState : Page list =
+        if File.Exists uploadedPagesStateFile then
+            File.ReadAllText uploadedPagesStateFile
+            |> Json.deserialize
+        else
+            []
+
+    let uploadedPageStateDict =
+        uploadedPageState
+        |> Seq.map (fun x -> x.SilverstripeId, x)
+        |> Map.ofSeq
+
+
+    // First, create all the pages with empty content. This ensures that we know what ids to use
+    // for parent page references, site tree links, etc
+
+    let! uploadedPages =
+        exportPages
+        |> Seq.map (fun page -> task {
+            match uploadedPageStateDict |> Map.tryFind page.Id with
+            | Some page -> return page
+            | None ->
+
+            logger.LogInformation("Creating '{title}'...", page.Title)
+
+            let post = Post()
+            post.Title <- Title (page.Title + " v8")
+            post.Date <- page.LastEdited
+            post.Content <- Content ""
+            post.Type <-
+                match page.ClassName with
+                | "ArticleHolder"
+                | "HomePage"
+                | "MeetEventTopPage"
+                | "NewsletterHolder"
+                | "Page" -> "page"
+
+                | "MeetingEventPage" -> "post"
+
+                | x ->
+                    logger.LogWarning("unhandled ClassName {className}", x)
+                    "post"
+            
+            post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+
+            if dryRun then
+                return {
+                    Page.SilverstripeId = page.Id
+                    WordPressId = -page.Id
+                    WordPressUrl = sprintf "dryrun-placeholder-url-page-%i" page.Id
+                }
+            else
+                let! result = wordpress.Posts.CreateAsync(post)
+                logger.LogInformation("created page {id}", result.Id)
+
+                return {
+                    Page.SilverstripeId = page.Id
+                    WordPressId = result.Id
+                    WordPressUrl = result.Link
+                }
+        })
+        |> System.Threading.Tasks.Task.WhenAll
+
+    File.WriteAllText(uploadedPagesStateFile, Json.serialize uploadedPages)
+
+    let uploadedPageStateDict =
+        uploadedPages
+        |> Seq.map (fun x -> x.SilverstripeId, x)
+        |> Map.ofSeq
+
+    // Now, set the content for each page
     for page in exportPages do
+        let uploadedPage = uploadedPageStateDict |> Map.find page.Id
         logger.LogInformation("Processing '{title}'...", page.Title)
 
         let mutable content = page.Content
@@ -152,12 +260,15 @@ task {
         let shortcodes = Silverstripe.findShortcodes page.Content
         for shortcode in shortcodes do
             logger.LogDebug("{shortcode}", sprintf "%A" shortcode)
-    
+
             match shortcode.Kind with
             | Silverstripe.Image image ->
-                let media = wordpressMedia[image.Id]
-                content <- content.Replace(shortcode.Text, $"""<!-- wp:image {{"id":{media.WordPressId}}} --><figure class="wp-block-image"><img src="{media.WordPressSourceUrl}" class="wp-image-{media.WordPressId}" /></figure><!-- /wp:image -->""")
-    
+                match wordpressMedia |> Map.tryFind image.Id with
+                | Some media ->
+                    content <- content.Replace(shortcode.Text, $"""<!-- wp:image {{"id":{media.WordPressId}}} --><figure class="wp-block-image"><img src="{media.WordPressSourceUrl}" class="wp-image-{media.WordPressId}" /></figure><!-- /wp:image -->""")
+                | None ->
+                    logger.LogWarning("Image with id {id} not found", image.Id)
+
             | Silverstripe.FileLink id ->
                 match wordpressMedia |> Map.tryFind id with
                 | Some media ->
@@ -165,15 +276,24 @@ task {
                     content <- content.Replace(shortcode.Text, media.WordPressSourceUrl)
                 | None ->
                     logger.LogWarning("File with id {id} not found", id)
+
+            | Silverstripe.SiteTreeLink id ->
+                match uploadedPageStateDict |> Map.tryFind id with
+                | Some page ->
+                    content <- content.Replace(shortcode.Text, page.WordPressUrl)
+                | None ->
+                    logger.LogWarning("Page with id {id} not found", id)
             | x ->
                 logger.LogWarning("Shortcode {shortcode} not supported", sprintf "%A" x)
 
-        // if page.Title = "2023 Newsletters" then
+        // if page.Title = "Latest News" then
         //     printfn "%s" page.Content
         //     printfn "----"
         //     printfn "%s" content
 
+        // todo: set parent page
         let post = Post()
+        post.Id <- uploadedPage.WordPressId
         post.Title <- Title (page.Title + " v8")
         post.Date <- page.LastEdited
         post.Content <- Content content
@@ -184,17 +304,17 @@ task {
             | "MeetEventTopPage"
             | "NewsletterHolder"
             | "Page" -> "page"
-            
+
             | "MeetingEventPage" -> "post"
-            
+
             | x ->
                 logger.LogWarning("unhandled ClassName {className}", x)
                 "post"
-        post.Status <- Status.Publish  // todo: draft for drafts
+        post.Status <- if page.IsDraft then Status.Draft else Status.Publish
 
         if not dryRun then
-            let! result = wordpress.Posts.CreateAsync(post)
-            logger.LogInformation("created page {id}", result.Id)
+            let! result = wordpress.Posts.UpdateAsync(post)
+            logger.LogInformation("updated page {id}", result.Id)
 }
 |> fun x -> x.Wait()
 
