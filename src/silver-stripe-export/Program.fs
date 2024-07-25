@@ -31,6 +31,7 @@ let dump (maybeLimit : int option) (rows : seq<seq<string * obj>>) =
 type SilverstripePage = {
     Id : int
     Title : string
+    ParentId : int
     ClassName : string
     Content : string
     IsDraft : bool
@@ -43,9 +44,14 @@ type Media = {
     WordPressSourceUrl : string
 }
 
+type PageType =
+    | Page
+    | Post
+
 type Page = {
     SilverstripeId : int
     WordPressId : int
+    PageType : PageType
     WordPressUrl : string
 }
 
@@ -76,6 +82,7 @@ task {
         |> Seq.map (fun x -> {
             Id = x.Id
             Title = x.Title
+            ParentId = x.ParentId
             ClassName = x.ClassName
             Content = x.Content
             IsDraft = false
@@ -88,6 +95,7 @@ task {
         |> Seq.map (fun x -> {
             Id = x.Id
             Title = x.Title
+            ParentId = x.ParentId
             ClassName = x.ClassName
             Content = x.Content
             IsDraft = true
@@ -171,7 +179,8 @@ task {
         })
         |> System.Threading.Tasks.Task.WhenAll
 
-    File.WriteAllText(uploadedMediaStateFile, Json.serialize uploadedMedia)
+    if not dryRun then
+        File.WriteAllText(uploadedMediaStateFile, Json.serialize uploadedMedia)
 
     let wordpressMedia =
         uploadedMedia
@@ -195,6 +204,19 @@ task {
 
     // First, create all the pages with empty content. This ensures that we know what ids to use
     // for parent page references, site tree links, etc
+    let pageType className : PageType =
+        match className with
+        | "ArticleHolder"
+        | "HomePage"
+        | "MeetEventTopPage"
+        | "NewsletterHolder"
+        | "Page" -> Page
+
+        | "MeetingEventPage" -> Page // Was Post, but seems like these have a hierarchy too...?
+
+        | x ->
+            logger.LogWarning("unhandled ClassName {className}", x)
+            Post
 
     let! uploadedPages =
         exportPages
@@ -205,45 +227,52 @@ task {
 
             logger.LogInformation("Creating '{title}'...", page.Title)
 
-            let post = Post()
-            post.Title <- Title (page.Title + " v8")
-            post.Date <- page.LastEdited
-            post.Content <- Content ""
-            post.Type <-
-                match page.ClassName with
-                | "ArticleHolder"
-                | "HomePage"
-                | "MeetEventTopPage"
-                | "NewsletterHolder"
-                | "Page" -> "page"
-
-                | "MeetingEventPage" -> "post"
-
-                | x ->
-                    logger.LogWarning("unhandled ClassName {className}", x)
-                    "post"
-            
-            post.Status <- if page.IsDraft then Status.Draft else Status.Publish
-
             if dryRun then
                 return {
                     Page.SilverstripeId = page.Id
                     WordPressId = -page.Id
+                    PageType = pageType page.ClassName
                     WordPressUrl = sprintf "dryrun-placeholder-url-page-%i" page.Id
                 }
             else
+            
+            match pageType page.ClassName with
+            | Page ->
+                let post = WordPressPCL.Models.Page()
+                post.Title <- Title (page.Title + " v8")
+                post.Date <- page.LastEdited
+                post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+
+                let! result = wordpress.Pages.CreateAsync(post)
+                logger.LogInformation("created page {id}", result.Id)
+
+                return {
+                    Page.SilverstripeId = page.Id
+                    WordPressId = result.Id
+                    PageType = Page
+                    WordPressUrl = result.Link
+                }
+
+            | Post ->
+                let post = WordPressPCL.Models.Post()
+                post.Title <- Title (page.Title + " v8")
+                post.Date <- page.LastEdited
+                post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+
                 let! result = wordpress.Posts.CreateAsync(post)
                 logger.LogInformation("created page {id}", result.Id)
 
                 return {
                     Page.SilverstripeId = page.Id
                     WordPressId = result.Id
+                    PageType = Post
                     WordPressUrl = result.Link
                 }
         })
         |> System.Threading.Tasks.Task.WhenAll
 
-    File.WriteAllText(uploadedPagesStateFile, Json.serialize uploadedPages)
+    if not dryRun then
+        File.WriteAllText(uploadedPagesStateFile, Json.serialize uploadedPages)
 
     let uploadedPageStateDict =
         uploadedPages
@@ -291,30 +320,32 @@ task {
         //     printfn "----"
         //     printfn "%s" content
 
-        // todo: set parent page
-        let post = Post()
-        post.Id <- uploadedPage.WordPressId
-        post.Title <- Title (page.Title + " v8")
-        post.Date <- page.LastEdited
-        post.Content <- Content content
-        post.Type <-
-            match page.ClassName with
-            | "ArticleHolder"
-            | "HomePage"
-            | "MeetEventTopPage"
-            | "NewsletterHolder"
-            | "Page" -> "page"
-
-            | "MeetingEventPage" -> "post"
-
-            | x ->
-                logger.LogWarning("unhandled ClassName {className}", x)
-                "post"
-        post.Status <- if page.IsDraft then Status.Draft else Status.Publish
-
         if not dryRun then
-            let! result = wordpress.Posts.UpdateAsync(post)
-            logger.LogInformation("updated page {id}", result.Id)
+            match pageType page.ClassName with
+            | Page ->
+                let post = WordPressPCL.Models.Page()
+                post.Id <- uploadedPage.WordPressId
+                post.Title <- Title (page.Title + " v8")
+                post.Date <- page.LastEdited
+                post.Content <- Content content
+                post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+
+                if page.ParentId <> 0 then
+                    post.Parent <- uploadedPageStateDict[page.ParentId].WordPressId
+
+                let! result = wordpress.Pages.UpdateAsync(post)
+                logger.LogInformation("updated page {id}", result.Id)
+
+            | Post ->
+                let post = WordPressPCL.Models.Post()
+                post.Id <- uploadedPage.WordPressId
+                post.Title <- Title (page.Title + " v8")
+                post.Date <- page.LastEdited
+                post.Content <- Content content
+                post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+
+                let! result = wordpress.Posts.UpdateAsync(post)
+                logger.LogInformation("updated page {id}", result.Id)
 }
 |> fun x -> x.Wait()
 
@@ -323,5 +354,5 @@ loggerFactory.Dispose()
 // Wait for console logger to process its queue. On Dispose it will only wait
 // for up to 1.5s to clear the queue, and we might have more to go...
 // https://github.com/dotnet/runtime/blob/894f22d768e510fddb34259eca1107a5b26c9415/src/libraries/Microsoft.Extensions.Logging.Console/src/ConsoleLoggerProcessor.cs#L191
-Thread.Sleep(TimeSpan.FromSeconds 1)
+Thread.Sleep(TimeSpan.FromSeconds 5)
 printfn "end."
