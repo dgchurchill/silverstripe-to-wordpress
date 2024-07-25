@@ -6,6 +6,8 @@ open WordPressPCL.Models
 open System.Threading
 open System
 
+let dryRun = true
+
 let loggerFactory =
     LoggerFactory.Create(fun builder ->
         builder
@@ -145,8 +147,6 @@ task {
         |> Seq.map (fun x -> x.SilverstripeId, x)
         |> Map.ofSeq
 
-    let dryRun = true
-
     let! uploadedMedia =
         requiredFiles
         |> Seq.map (fun file -> task {
@@ -158,9 +158,12 @@ task {
             if file.FileVariant <> "" then
                 failwithf "file %i '%s' '%s' has non-null variant" file.Id file.Name file.FileVariant
 
-            let path = Path.Combine(Config.silverstripeAssetBasePath, (Silverstripe.getFilesystemPath file.FileFilename file.FileHash))
+            let path = Path.Join(Config.silverstripeAssetBasePath, (Silverstripe.getFilesystemPath file.FileFilename file.FileHash))
 
             if dryRun then
+                if not <| File.Exists path then
+                    logger.LogWarning("Media file {id} at {path} does not exist", file.Id, path)
+            
                 return {
                     Media.SilverstripeId = file.Id
                     WordPressId = -file.Id
