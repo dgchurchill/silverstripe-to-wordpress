@@ -6,6 +6,10 @@ open WordPressPCL.Models
 open System.Threading
 open System
 
+// todo:
+// - fix up styling
+// - pull out event time and location
+
 let dryRun = true
 
 let loggerFactory =
@@ -19,40 +23,28 @@ let loggerFactory =
             .SetMinimumLevel(LogLevel.Information)
             |> ignore)
 
-let dump (maybeLimit : int option) (rows : seq<seq<string * obj>>) =
-    let limitedRows =
-        match maybeLimit with
-        | Some limit -> rows |> Seq.mapi (fun i x -> i, x) |> Seq.takeWhile (fst >> (>) limit) |> Seq.map snd
-        | None -> rows
-
-    for row in limitedRows do
-        for key, value in row do
-            printf "%s: %O; " key value
-        printfn ""
-
-type SilverstripePage = {
-    Id : int
-    Title : string
-    ParentId : int
-    ClassName : string
-    Content : string
-    IsDraft : bool
-    LastEdited : DateTime
-}
-
 type Media = {
     SilverstripeId : int
     WordPressId : int
     WordPressSourceUrl : string
 }
 
+type PublishedOrDraft =
+    | Published
+    | Draft
+
 type PageType =
     | Page
     | Post
 
+type PageState =
+    | Created
+    | Completed
+
 type Page = {
     SilverstripeId : int
     WordPressId : int
+    PageState : PageState
     PageType : PageType
     WordPressUrl : string
 }
@@ -64,51 +56,37 @@ task {
 
     let silverstripe = Silverstripe.Sql.GetDataContext().Silverstripe
 
-    // todo: may need to join these to the posts?
-    //dump (Some 10) (silverstripe.MeetingEventPageLive |> Seq.map (fun x -> x.ColumnValues))
-
-
-    // for file in silverstripe.FileLive do
-    //     printfn "%i; %s; %s; %s; %s; %s; %i; %i; %s" file.Id file.ClassName file.FileFilename file.FileHash file.FileVariant file.Name file.OwnerId file.ParentId file.Title
-
     let files =
         silverstripe.FileLive
         |> Seq.map (fun x -> x.Id, x)
         |> Map.ofSeq
 
-    // todo: verify that each page id only appears in either livePages OR draftPages
-
-    let livePages : SilverstripePage seq =
-        silverstripe.SiteTreeLive
-        |> Seq.where (fun page -> page.ShowInMenus <> 0uy || page.ShowInSearch <> 0uy)  // pages that have ShowInMenus and ShowInSearch false are error pages or otherwise not visible
-        |> Seq.map (fun x -> {
-            Id = x.Id
-            Title = x.Title
-            ParentId = x.ParentId
-            ClassName = x.ClassName
-            Content = x.Content
-            IsDraft = false
-            LastEdited = x.LastEdited
-        })
-
-    let draftPages =
-        silverstripe.SiteTree
-        |> Seq.where (fun page -> page.ShowInMenus <> 0uy || page.ShowInSearch <> 0uy)  // pages that have ShowInMenus and ShowInSearch false are error pages or otherwise not visible
-        |> Seq.map (fun x -> {
-            Id = x.Id
-            Title = x.Title
-            ParentId = x.ParentId
-            ClassName = x.ClassName
-            Content = x.Content
-            IsDraft = true
-            LastEdited = x.LastEdited
-        })
+    // load pages:
+    // 1. from SiteTreeLive, get page and version, get corresponding value from MeetingEventPageLive
+    // 2. from SiteTree, get page and version, get corresponding value from MeetingEventPage
+    // 3. merge together based on page ids: if in just draft, then draft, or if draft version > live version then draft (but there's also a published version...)
 
     let exportPages =
-        Seq.concat [| livePages; draftPages |]
+        seq {
+            for published, draft in Silverstripe.pages silverstripe do
+                match published, draft with
+                | Some p, Some d ->
+                    if d.Version > p.Version then
+                        logger.LogWarning("Draft of page id {id} \"{title}\" is version {draftVersion} which is later than published version {publishedVersion}. Draft changes will be lost.", p.Id, p.Title, d.Version, p.Version)
+                    yield p, Published
+            
+                | Some p, None ->
+                    yield p, Published
+
+                | None, Some d ->
+                    yield d, Draft
+                
+                | None, None ->
+                    failwith "Export page has no draft or published version"
+        }
         |> List.ofSeq
 
-    let requiredFilesForPage (page : SilverstripePage) : int seq =
+    let requiredFilesForPage (page : Silverstripe.Page) : int seq =
         Silverstripe.findShortcodes page.Content
         |> Seq.choose (fun shortcode ->
             let maybeId =
@@ -128,7 +106,7 @@ task {
 
     let requiredFiles =
         exportPages
-        |> Seq.collect requiredFilesForPage
+        |> Seq.collect (fst >> requiredFilesForPage)
         |> Set.ofSeq
         |> Seq.map (fun i -> files[i])
         |> List.ofSeq
@@ -223,7 +201,7 @@ task {
 
     let! uploadedPages =
         exportPages
-        |> Seq.map (fun page -> task {
+        |> Seq.map (fun (page, publishedOrDraft) -> task {
             match uploadedPageStateDict |> Map.tryFind page.Id with
             | Some page -> return page
             | None ->
@@ -234,6 +212,7 @@ task {
                 return {
                     Page.SilverstripeId = page.Id
                     WordPressId = -page.Id
+                    PageState = Created
                     PageType = pageType page.ClassName
                     WordPressUrl = sprintf "dryrun-placeholder-url-page-%i" page.Id
                 }
@@ -242,9 +221,9 @@ task {
             match pageType page.ClassName with
             | Page ->
                 let post = WordPressPCL.Models.Page()
-                post.Title <- Title (page.Title + " v8")
+                post.Title <- Title page.Title
                 post.Date <- page.LastEdited
-                post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+                post.Status <- match publishedOrDraft with Published -> Status.Publish | Draft -> Status.Draft
 
                 let! result = wordpress.Pages.CreateAsync(post)
                 logger.LogInformation("created page {id}", result.Id)
@@ -252,15 +231,16 @@ task {
                 return {
                     Page.SilverstripeId = page.Id
                     WordPressId = result.Id
+                    PageState = Created
                     PageType = Page
                     WordPressUrl = result.Link
                 }
 
             | Post ->
                 let post = WordPressPCL.Models.Post()
-                post.Title <- Title (page.Title + " v8")
+                post.Title <- Title page.Title
                 post.Date <- page.LastEdited
-                post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+                post.Status <- match publishedOrDraft with Published -> Status.Publish | Draft -> Status.Draft
 
                 let! result = wordpress.Posts.CreateAsync(post)
                 logger.LogInformation("created page {id}", result.Id)
@@ -268,6 +248,7 @@ task {
                 return {
                     Page.SilverstripeId = page.Id
                     WordPressId = result.Id
+                    PageState = Created
                     PageType = Post
                     WordPressUrl = result.Link
                 }
@@ -277,13 +258,13 @@ task {
     if not dryRun then
         File.WriteAllText(uploadedPagesStateFile, Json.serialize uploadedPages)
 
-    let uploadedPageStateDict =
+    let mutable uploadedPageStateDict =
         uploadedPages
         |> Seq.map (fun x -> x.SilverstripeId, x)
         |> Map.ofSeq
 
     // Now, set the content for each page
-    for page in exportPages do
+    for (page, publishedOrDraft) in exportPages do
         let uploadedPage = uploadedPageStateDict |> Map.find page.Id
         logger.LogInformation("Processing '{title}'...", page.Title)
 
@@ -328,10 +309,10 @@ task {
             | Page ->
                 let post = WordPressPCL.Models.Page()
                 post.Id <- uploadedPage.WordPressId
-                post.Title <- Title (page.Title + " v8")
+                post.Title <- Title page.Title
                 post.Date <- page.LastEdited
                 post.Content <- Content content
-                post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+                post.Status <- match publishedOrDraft with Published -> Status.Publish | Draft -> Status.Draft
 
                 if page.ParentId <> 0 then
                     post.Parent <- uploadedPageStateDict[page.ParentId].WordPressId
@@ -342,13 +323,19 @@ task {
             | Post ->
                 let post = WordPressPCL.Models.Post()
                 post.Id <- uploadedPage.WordPressId
-                post.Title <- Title (page.Title + " v8")
+                post.Title <- Title page.Title
                 post.Date <- page.LastEdited
                 post.Content <- Content content
-                post.Status <- if page.IsDraft then Status.Draft else Status.Publish
+                post.Status <- match publishedOrDraft with Published -> Status.Publish | Draft -> Status.Draft
 
                 let! result = wordpress.Posts.UpdateAsync(post)
                 logger.LogInformation("updated page {id}", result.Id)
+
+            uploadedPageStateDict <-
+                uploadedPageStateDict
+                |> Map.add page.Id { uploadedPage with PageState = Completed }
+
+            File.WriteAllText(uploadedPagesStateFile, Json.serialize uploadedPages)
 }
 |> fun x -> x.Wait()
 
