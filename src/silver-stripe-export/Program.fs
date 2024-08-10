@@ -6,10 +6,6 @@ open WordPressPCL.Models
 open System.Threading
 open System
 
-// todo:
-// - fix up styling
-// - pull out event time and location
-
 let dryRun = true
 
 let loggerFactory =
@@ -64,7 +60,7 @@ task {
     // load pages:
     // 1. from SiteTreeLive, get page and version, get corresponding value from MeetingEventPageLive
     // 2. from SiteTree, get page and version, get corresponding value from MeetingEventPage
-    // 3. merge together based on page ids: if in just draft, then draft, or if draft version > live version then draft (but there's also a published version...)
+    // 3. merge together based on page ids: if in just draft, then draft, or if draft version > live version then draft (but warn that there's also a published version...)
 
     let exportPages =
         seq {
@@ -299,10 +295,10 @@ task {
             | x ->
                 logger.LogWarning("Shortcode {shortcode} not supported", sprintf "%A" x)
 
-        // if page.Title = "Latest News" then
-        //     printfn "%s" page.Content
-        //     printfn "----"
-        //     printfn "%s" content
+        match page.ExtensionData with
+        | Some extensionData ->
+            content <- sprintf "<p><b>Date:</b> %s<br><b>Location:</b> %s</p>" (extensionData.Date.ToString "dddd, d MMMM yyyy") extensionData.Location + content
+        | _ -> ()
 
         if not dryRun then
             match pageType page.ClassName with
