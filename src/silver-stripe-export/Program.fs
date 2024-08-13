@@ -297,7 +297,7 @@ task {
 
         match page.ExtensionData with
         | Some extensionData ->
-            content <- sprintf "<p><b>Date:</b> %s<br><b>Location:</b> %s</p>" (extensionData.Date.ToString "dddd, d MMMM yyyy") extensionData.Location + content
+            content <- sprintf "<p><b>Date:</b> %s</p><p><b>Location:</b> %s</p>" (extensionData.Date.ToString "dddd, d MMMM yyyy") extensionData.Location + content
         | _ -> ()
 
         if not dryRun then
