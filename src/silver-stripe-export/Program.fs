@@ -40,6 +40,7 @@ type PageState =
 type Page = {
     SilverstripeId : int
     WordPressId : int
+    Title : string
     PageState : PageState
     PageType : PageType
     WordPressUrl : string
@@ -49,6 +50,10 @@ task {
     let logger = loggerFactory.CreateLogger("main")
     
     let! wordpress = Wordpress.createClient Config.wordpressConfig
+
+    let! wordpressCategories = wordpress.Categories.GetAllAsync()
+    let eventCategoryId = wordpressCategories |> Seq.find (fun x -> x.Name = "Event") |> fun x -> x.Id
+    let meetingCategoryId = wordpressCategories |> Seq.find (fun x -> x.Name = "Meeting") |> fun x -> x.Id
 
     let silverstripe = Silverstripe.Sql.GetDataContext().Silverstripe
 
@@ -189,7 +194,7 @@ task {
         | "NewsletterHolder"
         | "Page" -> Page
 
-        | "MeetingEventPage" -> Page // Was Post, but seems like these have a hierarchy too...?
+        | "MeetingEventPage" -> Post
 
         | x ->
             logger.LogWarning("unhandled ClassName {className}", x)
@@ -208,6 +213,7 @@ task {
                 return {
                     Page.SilverstripeId = page.Id
                     WordPressId = -page.Id
+                    Title = page.Title
                     PageState = Created
                     PageType = pageType page.ClassName
                     WordPressUrl = sprintf "dryrun-placeholder-url-page-%i" page.Id
@@ -227,6 +233,7 @@ task {
                 return {
                     Page.SilverstripeId = page.Id
                     WordPressId = result.Id
+                    Title = page.Title
                     PageState = Created
                     PageType = Page
                     WordPressUrl = result.Link
@@ -244,6 +251,7 @@ task {
                 return {
                     Page.SilverstripeId = page.Id
                     WordPressId = result.Id
+                    Title = page.Title
                     PageState = Created
                     PageType = Post
                     WordPressUrl = result.Link
@@ -258,6 +266,9 @@ task {
         uploadedPages
         |> Seq.map (fun x -> x.SilverstripeId, x)
         |> Map.ofSeq
+
+    let eventsPage = uploadedPages |> Seq.find (fun x -> x.Title = "Events")
+    let meetingsPage = uploadedPages |> Seq.find (fun x -> x.Title = "Meetings")
 
     // Now, set the content for each page
     for (page, publishedOrDraft) in exportPages do
@@ -323,6 +334,12 @@ task {
                 post.Date <- page.LastEdited
                 post.Content <- Content content
                 post.Status <- match publishedOrDraft with Published -> Status.Publish | Draft -> Status.Draft
+
+                post.Categories <-
+                    match page.ParentId with
+                    | x when x = eventsPage.SilverstripeId -> ResizeArray [ eventCategoryId ]
+                    | x when x = meetingsPage.SilverstripeId -> ResizeArray [ meetingCategoryId ]
+                    | _ -> ResizeArray()
 
                 let! result = wordpress.Posts.UpdateAsync(post)
                 logger.LogInformation("updated page {id}", result.Id)
