@@ -8,6 +8,8 @@ open System
 
 let dryRun = true
 
+// todo: support the permissions (CanViewType, CanEditType) somehow
+
 let loggerFactory =
     LoggerFactory.Create(fun builder ->
         builder
