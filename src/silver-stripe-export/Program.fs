@@ -313,12 +313,19 @@ task {
             content <- sprintf "<p><b>Date:</b> %s</p><p><b>Location:</b> %s</p>" (extensionData.Date.ToString "dddd, d MMMM yyyy") extensionData.Location + content
         | _ -> ()
 
+        let title =
+            match page.ExtensionData with
+            | Some extensionData ->
+                sprintf "%s %s" (extensionData.Date.ToString "yyyy-MM-dd") page.Title
+            | None ->
+                page.Title
+
         if not dryRun then
             match pageType page.ClassName with
             | Page ->
                 let post = WordPressPCL.Models.Page()
                 post.Id <- uploadedPage.WordPressId
-                post.Title <- Title page.Title
+                post.Title <- Title title
                 post.Date <- page.LastEdited
                 post.Content <- Content content
                 post.Status <- match publishedOrDraft with Published -> Status.Publish | Draft -> Status.Draft
@@ -332,7 +339,7 @@ task {
             | Post ->
                 let post = WordPressPCL.Models.Post()
                 post.Id <- uploadedPage.WordPressId
-                post.Title <- Title page.Title
+                post.Title <- Title title
                 post.Date <- page.LastEdited
                 post.Content <- Content content
                 post.Status <- match publishedOrDraft with Published -> Status.Publish | Draft -> Status.Draft
