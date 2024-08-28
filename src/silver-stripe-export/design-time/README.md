@@ -1,3 +1,5 @@
+Refer to nuget for the licenses for the libraries in this directory.
+
 This has MySqlConnector built from https://github.com/dgchurchill/MySqlConnector which has Microsoft.Extensions.Logging.Abstractions set to v6.0.2.
 This version matches the version used by FsAutoComplete.
 If these versions aren't compatible then MySqlConnector will fail to load at design time.
